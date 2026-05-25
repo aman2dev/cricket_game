@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Cricket Bat Controller</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            background-color: #1a1a1a;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+
+        #startBtn {
+            padding: 20px 40px;
+            font-size: 20px;
+            background-color: #008CBA;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            margin-bottom: 20px;
+            transition: transform 0.1s;
+        }
+
+        #calibrateBtn {
+            padding: 25px 50px;
+            font-size: 24px;
+            font-weight: bold;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 15px;
+            box-shadow: 0 6px 20px rgba(76, 175, 80, 0.4);
+            display: none;
+            margin-bottom: 20px;
+            transition: transform 0.1s, background-color 0.2s;
+        }
+
+        #pitchBtn {
+            padding: 25px 50px;
+            font-size: 24px;
+            font-weight: bold;
+            background-color: #E91E63;
+            color: white;
+            border: none;
+            border-radius: 15px;
+            box-shadow: 0 6px 20px rgba(233, 30, 99, 0.4);
+            display: none;
+            transition: transform 0.1s, background-color 0.2s;
+        }
+
+        #startBtn:active, #calibrateBtn:active, #pitchBtn:active {
+            transform: scale(0.95);
+        }
+
+        #calibrateBtn:active {
+            background-color: #45a049;
+        }
+
+        #pitchBtn:active {
+            background-color: #d81b60;
+        }
+
+        .instructions {
+            text-align: center;
+            max-width: 80%;
+            margin-top: 20px;
+            color: #ccc;
+            font-size: 16px;
+        }
+
+        #debugLog {
+            margin-top: 30px;
+            padding: 10px;
+            background: #2b2b2b;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 11px;
+            color: #00ff00;
+            width: 80%;
+            max-height: 120px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            border: 1px solid #444;
+        }
+    </style>
+</head>
+<body>
+
+    <button id="startBtn">Enable Motion Sensors</button>
+    <button id="calibrateBtn">CALIBRATE</button>
+    <button id="pitchBtn">PITCH BALL</button>
+
+    <div class="instructions" id="instructions">
+        Tap to enable motion tracking for your bat.
+    </div>
+
+    <div id="debugLog">System Log: Initializing...</div>
+
+    <script>
+        const logEl = document.getElementById('debugLog');
+        function log(msg) {
+            logEl.innerText = msg + "\n" + logEl.innerText;
+        }
+
+        log("Raw WebSocket Controller Mode Active.");
+        
+        let socket;
+        let currentQuat = {x: 0, y: 0, z: 0, w: 1};
+        let sensorActive = false;
+
+        // Establish real-time WebSocket connection
+        function connectWS() {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${window.location.host}`;
+            log("Connecting to WebSocket: " + wsUrl);
+            
+            socket = new WebSocket(wsUrl);
+            
+            socket.onopen = () => {
+                log("WebSocket Connected successfully!");
+            };
+            
+            socket.onclose = () => {
+                log("WebSocket Disconnected. Reconnecting in 2s...");
+                setTimeout(connectWS, 2000);
+            };
+            
+            socket.onerror = (err) => {
+                log("WS Error occurred.");
+            };
+        }
+
+        connectWS();
+
+        // Convert Euler angles to Quaternion (Z-X'-Y'' sequence used by W3C Device Orientation)
+        function getQuaternion(alpha, beta, gamma) {
+            const degtorad = Math.PI / 180;
+            const _z = alpha ? alpha * degtorad : 0; // Z
+            const _x = beta ? beta * degtorad : 0;   // X
+            const _y = gamma ? gamma * degtorad : 0; // Y
+
+            const cX = Math.cos(_x/2);
+            const cY = Math.cos(_y/2);
+            const cZ = Math.cos(_z/2);
+            const sX = Math.sin(_x/2);
+            const sY = Math.sin(_y/2);
+            const sZ = Math.sin(_z/2);
+
+            const w = cX * cY * cZ - sX * sY * sZ;
+            const x = sX * cY * cZ - cX * sY * sZ;
+            const y = cX * sY * cZ + sX * cY * sZ;
+            const z = cX * cY * sZ + sX * sY * cZ;
+
+            return {x: x, y: y, z: z, w: w};
+        }
+
+        function handleOrientation(event) {
+            if (!sensorActive) {
+                sensorActive = true;
+                log("Sensors receiving data!");
+            }
+            
+            const a = event.alpha ? event.alpha.toFixed(1) : 0;
+            const b = event.beta ? event.beta.toFixed(1) : 0;
+            const g = event.gamma ? event.gamma.toFixed(1) : 0;
+            
+            currentQuat = getQuaternion(event.alpha, event.beta, event.gamma);
+            
+            logEl.innerText = `Sensors: A:${a} B:${b} G:${g}\nQuat: X:${currentQuat.x.toFixed(2)} Y:${currentQuat.y.toFixed(2)} Z:${currentQuat.z.toFixed(2)} W:${currentQuat.w.toFixed(2)}\n\n` + logEl.innerText.split('\n').slice(3).join('\n');
+        }
+
+        function sendData(payload) {
+            if (socket && socket.readyState === 1) { // 1 = OPEN
+                socket.send(JSON.stringify(payload));
+            }
+        }
+
+        document.getElementById('startBtn').addEventListener('click', function() {
+            log("Requesting motion permissions...");
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission()
+                    .then(permissionState => {
+                        log("Permission response: " + permissionState);
+                        if (permissionState === 'granted') {
+                            window.addEventListener('deviceorientation', handleOrientation);
+                            enableCalibrationUI();
+                        } else {
+                            alert("Permission denied. We need motion tracking to play!");
+                        }
+                    })
+                    .catch(err => {
+                        log("Permission Error: " + err.message);
+                    });
+            } else {
+                log("Activating sensors directly...");
+                window.addEventListener('deviceorientation', handleOrientation);
+                enableCalibrationUI();
+            }
+        });
+
+        function enableCalibrationUI() {
+            document.getElementById('startBtn').style.display = 'none';
+            document.getElementById('calibrateBtn').style.display = 'block';
+            document.getElementById('pitchBtn').style.display = 'block';
+            document.getElementById('instructions').innerText = "Hold your phone upright, tap CALIBRATE. Tap PITCH BALL to throw!";
+        }
+
+        document.getElementById('calibrateBtn').addEventListener('click', function() {
+            log("Sending CALIBRATE command...");
+            if (navigator.vibrate) navigator.vibrate(50);
+            sendData("CALIBRATE");
+        });
+
+        document.getElementById('pitchBtn').addEventListener('click', function() {
+            log("Sending PITCH command...");
+            if (navigator.vibrate) navigator.vibrate(50);
+            sendData("PITCH");
+        });
+
+        // Transmit data at ~30 FPS (33ms interval)
+        setInterval(function() {
+            if (sensorActive) {
+                sendData(currentQuat);
+            }
+        }, 33);
+    </script>
+</body>
+</html>
