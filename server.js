@@ -1,9 +1,11 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 
-const PORT = 8000;
+const HTTP_PORT = 8000;
+const HTTPS_PORT = 8001;
 
 // MIME types dictionary for static file serving
 const MIME_TYPES = {
@@ -21,8 +23,8 @@ const MIME_TYPES = {
     '.apple-touch-icon.png': 'image/png'
 };
 
-// Create HTTP server
-const server = http.createServer((req, res) => {
+// Static file server logic
+function serveStaticFile(req, res) {
     // Strip query parameters
     const urlPath = req.url.split('?')[0];
     let filePath = path.join(__dirname, urlPath === '/' ? 'index.html' : urlPath);
@@ -58,10 +60,25 @@ const server = http.createServer((req, res) => {
             res.end(content, 'utf-8');
         }
     });
-});
+}
 
-// Create WebSocket server attached to HTTP server
-const wss = new WebSocketServer({ server });
+// 1. Create HTTP server on Port 8000
+const httpServer = http.createServer(serveStaticFile);
+
+// 2. Create HTTPS server on Port 8001
+let httpsServer;
+try {
+    const options = {
+        key: fs.readFileSync(path.join(__dirname, 'key.pem')),
+        cert: fs.readFileSync(path.join(__dirname, 'cert.pem'))
+    };
+    httpsServer = https.createServer(options, serveStaticFile);
+} catch (e) {
+    console.error("Warning: Failed to load SSL certificates. HTTPS server will not start. Details:", e.message);
+}
+
+// 3. Create WebSocket Server with noServer option (shared upgrade handler)
+const wss = new WebSocketServer({ noServer: true });
 
 wss.on('connection', (ws) => {
     console.log('Client connected to WebSocket server.');
@@ -80,7 +97,24 @@ wss.on('connection', (ws) => {
     });
 });
 
-server.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
-    console.log(`WebSocket server active on ws://localhost:${PORT}`);
+// Upgrade handler to share WebSocket across both ports
+function handleUpgrade(request, socket, head) {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+    });
+}
+
+httpServer.on('upgrade', handleUpgrade);
+
+httpServer.listen(HTTP_PORT, () => {
+    console.log(`HTTP Server running at http://localhost:${HTTP_PORT}`);
+    console.log(`WebSocket server active on ws://localhost:${HTTP_PORT}`);
 });
+
+if (httpsServer) {
+    httpsServer.on('upgrade', handleUpgrade);
+    httpsServer.listen(HTTPS_PORT, () => {
+        console.log(`HTTPS Server running at https://localhost:${HTTPS_PORT}`);
+        console.log(`Secure WebSocket server active on wss://localhost:${HTTPS_PORT}`);
+    });
+}
