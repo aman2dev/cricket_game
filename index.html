@@ -112,27 +112,7 @@ body {
                 const data = JSON.parse(event.data);
                 if (data !== undefined && window.onAirConsoleMessage) {
                     if (typeof data === 'string') {
-                        // Forward "PITCH" or "CALIBRATE" string commands directly to Godot
-                        window.onAirConsoleMessage(1, JSON.stringify(data));
-                    } else if (data.x !== undefined) {
-                        // Forward Quaternion rotation data to Godot
-                        window.onAirConsoleMessage(1, JSON.stringify(data));
-                    }
-                }
-            } catch (err) {
-                console.error("Error parsing WS message:", err);
-            }
-        };
-
-        socket.onclose = () => {
-            console.log("WebSocket disconnected in game screen. Reconnecting in 2s...");
-            setTimeout(connectWS, 2000);
-        };
-    }
-
-    connectWS();
-</script>
-
+                        // Forward 
 	</head>
 	<body>
 		<canvas id="canvas">
@@ -151,7 +131,7 @@ body {
 
 		<script src="index.js"></script>
 		<script>
-const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":33680,"index.wasm":35739700},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
+const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":86868,"index.wasm":37685705},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
 const GODOT_THREADS_ENABLED = false;
 const engine = new Engine(GODOT_CONFIG);
 

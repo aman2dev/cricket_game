@@ -1,197 +1,144 @@
 extends Node3D
 
+## AirConsoleController.gd
+## Serves as the networking hub. Receives smartphone WebSocket packages and channels
+## sensor data to either the Batting Impact system (BatMesh) or the Bowler Input Receiver.
+
 @export var cricket_bat_node: Node3D
-@export var smoothing_speed: float = 40.0
+@export var pitcher_pos := Vector3(0, 1.2, -18)
+@export var batter_pos  := Vector3(0, 1.2,   0)
 
-# Axis Inversion settings to match playing facing the screen
-@export var invert_x: bool = false
-@export var invert_y: bool = true
-@export var invert_z: bool = true
-
-# Native Godot WebSocket Client
+# Networking
 var ws_client: WebSocketPeer = WebSocketPeer.new()
 var ws_connected: bool = false
-
-var raw_calibration_offset: Quaternion = Quaternion.IDENTITY
-var incoming_raw_quaternion: Quaternion = Quaternion.IDENTITY
-
-var debug_label: Label
-var score_label: Label
-
-# Gameplay variables
-var runs: int = 0
-var wickets: int = 0
-var balls_pitched: int = 0
-
-# Spawn coordinates
-var pitcher_pos = Vector3(0, 1.2, -18)
-var batter_pos = Vector3(0, 1.2, 0)
 var active_ball: RigidBody3D = null
 
-func _ready():
+# Bowling Windmill Gesture Detection
+var last_bowling_pitch: float = 0.0
+var last_bowling_time: float = 0.0
+const BOWLING_SPEED_THRESHOLD: float = 5.0 # Rads/sec threshold for fast change
+
+func _ready() -> void:
 	if not cricket_bat_node:
-		cricket_bat_node = self
-		
+		# Auto-detect a child node carrying the calibration/batting script if not assigned
+		for child in get_children():
+			if child.has_method("on_sensor_data_received"):
+				cricket_bat_node = child
+				break
+		if not cricket_bat_node:
+			cricket_bat_node = self
+
 	Engine.physics_ticks_per_second = 120
-		
-	# Screen overlay debug labels
-	var canvas_layer = CanvasLayer.new()
-	add_child(canvas_layer)
-	
-	debug_label = Label.new()
-	debug_label.text = "Connecting to WebSocket server..."
-	
-	var settings = LabelSettings.new()
-	settings.font_size = 20
-	settings.font_color = Color(0.0, 1.0, 0.0, 1.0)
-	settings.outline_size = 4
-	settings.outline_color = Color(0.0, 0.0, 0.0, 1.0)
-	debug_label.label_settings = settings
-	debug_label.position = Vector2(20, 20)
-	canvas_layer.add_child(debug_label)
 
-	# Score Board HUD
-	score_label = Label.new()
-	score_label.text = "SCORE: 0 Runs | Wickets: 0 | Balls: 0\n[Spacebar or Phone Tap to Pitch]"
-	var score_settings = LabelSettings.new()
-	score_settings.font_size = 32
-	score_settings.font_color = Color(1.0, 0.84, 0.0, 1.0)
-	score_settings.outline_size = 6
-	score_settings.outline_color = Color(0.0, 0.0, 0.0, 1.0)
-	score_label.label_settings = score_settings
-	score_label.position = Vector2(20, 80)
-	canvas_layer.add_child(score_label)
-
-	# Connect to local WebSocket server
+	# Connect to local Node.js relay server
 	var ws_url = "ws://localhost:8000"
-	if OS.has_feature("web"):
-		var window = JavaScriptBridge.get_interface("window")
-		if window:
-			var host = window.location.host
-			var protocol = "ws:"
-			if window.location.protocol == "https:":
-				protocol = "wss:"
-			ws_url = protocol + "//" + host
-			
-	print("Connecting to WebSocket URL: ", ws_url)
-	var err = ws_client.connect_to_url(ws_url)
-	if err != OK:
-		debug_label.text = "Connection error: " + str(err)
+	print("[Network] Connecting to WebSocket: ", ws_url)
+	if ws_client.connect_to_url(ws_url) != OK:
+		print("[Network] WebSocket connection failed to initialize.")
 
-func _process(delta):
-	# Handle spacebar pitching
+func _process(delta: float) -> void:
+	# Keyboard Fallbacks (For development/testing)
 	if Input.is_action_just_pressed("ui_accept"):
-		pitch_ball()
-		
-	# Poll WebSocket events
+		if GameManager.current_state == GameManager.State.TUTORIAL:
+			GameManager.change_state(GameManager.State.BOWLER_RUNUP)
+		elif GameManager.current_state == GameManager.State.BOWLER_RUNUP:
+			pitch_ball(1.0, 0.0)
+
 	ws_client.poll()
 	var state = ws_client.get_ready_state()
-	
+
 	if state == WebSocketPeer.STATE_OPEN:
 		if not ws_connected:
 			ws_connected = true
-			debug_label.text = "WebSocket Connected!"
-			
+			print("[Network] WebSocket connection opened successfully.")
 		while ws_client.get_available_packet_count() > 0:
-			var packet = ws_client.get_packet()
-			var data_str = packet.get_string_from_utf8()
-			_parse_message(data_str)
-			
-	elif state == WebSocketPeer.STATE_CLOSED:
-		if ws_connected:
-			ws_connected = false
-			debug_label.text = "WebSocket Disconnected. Reconnecting..."
-			ws_client.connect_to_url("ws://localhost:8000")
-			
-	if not cricket_bat_node:
-		return
-		
-	# Compute corrected rotation
-	var corrected_rotation = raw_calibration_offset.inverse() * incoming_raw_quaternion
-	
-	# Smoothly rotate the 3D bat AnimatableBody3D using Slerp
-	cricket_bat_node.quaternion = cricket_bat_node.quaternion.slerp(corrected_rotation, delta * smoothing_speed)
-	
-	# Track the ball game logic
-	if active_ball and is_instance_valid(active_ball):
-		if active_ball.position.z > 3.0:
-			if active_ball.linear_velocity.length() < 3.0 or active_ball.position.x < -2.0 or active_ball.position.x > 2.0:
-				update_hud("Ball Dead")
-				active_ball.queue_free()
-				active_ball = null
-			else:
-				wickets += 1
-				update_hud("WICKET! You missed it!")
-				active_ball.queue_free()
-				active_ball = null
-		elif active_ball.position.z < -4.0 and active_ball.linear_velocity.z < -4.0:
-			var distance = active_ball.position.distance_to(Vector3(0, 0, 0))
-			if distance > 12.0:
-				var hit_runs = 4
-				if distance > 22.0:
-					hit_runs = 6
-				runs += hit_runs
-				update_hud("SMASH! You scored " + str(hit_runs) + " Runs!")
-				active_ball.queue_free()
-				active_ball = null
+			_parse_message(ws_client.get_packet().get_string_from_utf8())
 
-func _parse_message(data_str: String):
+	elif state == WebSocketPeer.STATE_CLOSED and ws_connected:
+		ws_connected = false
+		print("[Network] WebSocket disconnected. Retrying in 2 seconds...")
+		ws_client.connect_to_url("ws://localhost:8000")
+
+func _parse_message(data_str: String) -> void:
 	var json = JSON.new()
-	var error = json.parse(data_str)
-	if error == OK:
-		var data = json.get_data()
-		
-		# 1. Handle String Command
-		if typeof(data) == TYPE_STRING:
-			if data == "CALIBRATE":
-				raw_calibration_offset = incoming_raw_quaternion
-				debug_label.text = "CALIBRATE RECEIVED!"
-				print("Calibration Offset Calibrated: ", raw_calibration_offset)
-			elif data == "PITCH":
-				pitch_ball()
-				
-		# 2. Handle Quaternion payload object
-		elif typeof(data) == TYPE_DICTIONARY:
-			if data.has("x") and data.has("y") and data.has("z") and data.has("w"):
-				# Apply axis inversion settings
-				var q_x = -float(data.x) if invert_x else float(data.x)
-				var q_y = -float(data.y) if invert_y else float(data.y)
-				var q_z = -float(data.z) if invert_z else float(data.z)
-				var q_w = float(data.w)
-				
-				incoming_raw_quaternion = Quaternion(q_x, q_y, q_z, q_w)
-				
-				# Display values in debug overlay
-				debug_label.text = (
-					"Controller Connected\n" +
-					"X: " + str(snapped(incoming_raw_quaternion.x, 0.01)) + "\n" +
-					"Y: " + str(snapped(incoming_raw_quaternion.y, 0.01)) + "\n" +
-					"Z: " + str(snapped(incoming_raw_quaternion.z, 0.01)) + "\n" +
-					"W: " + str(snapped(incoming_raw_quaternion.w, 0.01)) + "\n" +
-					"Bat Rot: " + str(cricket_bat_node.rotation)
-				)
-	else:
-		debug_label.text = "JSON Parse Error: " + json.get_error_message()
+	if json.parse(data_str) != OK:
+		return
 
-func pitch_ball():
+	var data = json.get_data()
+
+	if typeof(data) == TYPE_STRING:
+		match data:
+			"CALIBRATE":
+				if cricket_bat_node and cricket_bat_node.has_method("calibrate_stance"):
+					cricket_bat_node.calibrate_stance()
+				if GameManager.current_state == GameManager.State.TUTORIAL:
+					GameManager.change_state(GameManager.State.BOWLER_RUNUP)
+			"PITCH":
+				if GameManager.current_state == GameManager.State.BOWLER_RUNUP:
+					pitch_ball(1.0, randf_range(-0.4, 0.4))
+
+	elif typeof(data) == TYPE_DICTIONARY:
+		if data.has("x") and data.has("y") and data.has("z") and data.has("w"):
+			var x = float(data.x)
+			var y = float(data.y)
+			var z = float(data.z)
+			var w = float(data.w)
+			
+			# 1. Forward raw orientation to Batting logic
+			if cricket_bat_node and cricket_bat_node.has_method("on_sensor_data_received"):
+				cricket_bat_node.on_sensor_data_received(x, y, z, w)
+			
+			# 2. Forward sensor values to Bowler Input logic during bowler phase
+			if GameManager.current_state == GameManager.State.BOWLER_RUNUP:
+				_process_bowling_input(x, y, z, w)
+
+## Bowler Input Receiver: Monitors fast pitch axis rotation (windmill gesture)
+func _process_bowling_input(x: float, y: float, z: float, w: float) -> void:
+	var current_time = Time.get_ticks_msec() / 1000.0
+	var dt = current_time - last_bowling_time
+	
+	var q = Quaternion(x, y, z, w)
+	# Extract Euler pitch angle (rotation around phone's local X-axis)
+	var euler = q.get_euler()
+	var current_pitch = euler.x
+	
+	if dt > 0.005 and last_bowling_time > 0.0:
+		var pitch_speed = abs(current_pitch - last_bowling_pitch) / dt
+		
+		# Detect rapid rotation (fast forward flip of the wrist/arm)
+		if pitch_speed > BOWLING_SPEED_THRESHOLD:
+			# Map angular velocity to a velocity multiplier (1.0 = base speed, up to 2.2)
+			var speed_multiplier = clamp(pitch_speed / 8.0, 0.9, 2.2)
+			# Add a spin sweep curve based on yaw tilt
+			var spin_offset = clamp(euler.y * 0.4, -0.6, 0.6)
+			
+			print("[BowlingNetwork] Windmill swing detected! Angular Speed: ", pitch_speed, " -> Ball Speed Mult: ", speed_multiplier)
+			pitch_ball(speed_multiplier, spin_offset)
+			
+	last_bowling_pitch = current_pitch
+	last_bowling_time = current_time
+
+## Instances a dynamic Ball.gd node in the scene and initiates launch impulse
+func pitch_ball(speed_multiplier: float, spin_offset: float) -> void:
+	# Clean up previous ball if still flying
 	if active_ball and is_instance_valid(active_ball):
 		active_ball.queue_free()
 		
-	balls_pitched += 1
-	update_hud("Ball Pitching...")
-
+	# Instance new RigidBody3D and assign Ball.gd script dynamically
 	active_ball = RigidBody3D.new()
+	active_ball.set_script(preload("res://Ball.gd"))
+	active_ball.name = "CricketBall"
 	active_ball.position = pitcher_pos
-	
 	active_ball.mass = 0.16
-	var ball_material = PhysicsMaterial.new()
-	ball_material.bounce = 0.65
-	active_ball.physics_material_override = ball_material
+	
+	var mat = PhysicsMaterial.new()
+	mat.bounce = 0.65
+	active_ball.physics_material_override = mat
 	
 	var col = CollisionShape3D.new()
-	var sphere_shape = SphereShape3D.new()
-	sphere_shape.radius = 0.15
-	col.shape = sphere_shape
+	var sph = SphereShape3D.new()
+	sph.radius = 0.15
+	col.shape = sph
 	active_ball.add_child(col)
 	
 	var mesh_inst = MeshInstance3D.new()
@@ -199,25 +146,15 @@ func pitch_ball():
 	sphere_mesh.radius = 0.15
 	sphere_mesh.height = 0.3
 	
-	var material = StandardMaterial3D.new()
-	material.albedo_color = Color(0.8, 0.1, 0.1, 1.0)
-	material.roughness = 0.2
-	sphere_mesh.material = material
+	var ball_mat = StandardMaterial3D.new()
+	ball_mat.albedo_color = Color(0.85, 0.1, 0.15, 1.0) # Stylized beach red ball
+	ball_mat.roughness = 0.15
+	sphere_mesh.material = ball_mat
 	mesh_inst.mesh = sphere_mesh
 	active_ball.add_child(mesh_inst)
 	
+	# Add to main scene root
 	get_parent().add_child(active_ball)
 	
-	var speed = randf_range(16.0, 20.0)
-	var direction = (batter_pos - pitcher_pos).normalized()
-	direction.y += 0.08
-	
-	active_ball.linear_velocity = direction * speed
-
-func update_hud(status_msg = ""):
-	var msg = "SCORE: " + str(runs) + " Runs | Wickets: " + str(wickets) + " | Balls: " + str(balls_pitched)
-	if status_msg != "":
-		msg += "\n[" + status_msg + "]"
-	else:
-		msg += "\n[Spacebar or Phone Tap to Pitch]"
-	score_label.text = msg
+	# Launch the ball pitch
+	active_ball.launch_pitch(speed_multiplier, spin_offset)

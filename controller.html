@@ -112,7 +112,7 @@
             logEl.innerText = msg + "\n" + logEl.innerText;
         }
 
-        log("Raw WebSocket Controller Mode Active.");
+        log("Hybrid WebSocket Controller Active.");
         
         let socket;
         let currentQuat = {x: 0, y: 0, z: 0, w: 1};
@@ -142,7 +142,7 @@
 
         connectWS();
 
-        // Convert Euler angles to Quaternion (Z-X'-Y'' sequence used by W3C Device Orientation)
+        // Convert Euler angles to Quaternion (Fallback for older APIs)
         function getQuaternion(alpha, beta, gamma) {
             const degtorad = Math.PI / 180;
             const _z = alpha ? alpha * degtorad : 0; // Z
@@ -164,47 +164,84 @@
             return {x: x, y: y, z: z, w: w};
         }
 
-        function handleOrientation(event) {
+        function handleLegacyOrientation(event) {
             if (!sensorActive) {
                 sensorActive = true;
-                log("Sensors receiving data!");
+                log("Legacy Sensors receiving data!");
             }
-            
-            const a = event.alpha ? event.alpha.toFixed(1) : 0;
-            const b = event.beta ? event.beta.toFixed(1) : 0;
-            const g = event.gamma ? event.gamma.toFixed(1) : 0;
-            
             currentQuat = getQuaternion(event.alpha, event.beta, event.gamma);
-            
-            logEl.innerText = `Sensors: A:${a} B:${b} G:${g}\nQuat: X:${currentQuat.x.toFixed(2)} Y:${currentQuat.y.toFixed(2)} Z:${currentQuat.z.toFixed(2)} W:${currentQuat.w.toFixed(2)}\n\n` + logEl.innerText.split('\n').slice(3).join('\n');
+            logEl.innerText = `Legacy Sensor: Active\n\n` + logEl.innerText.split('\n').slice(2).join('\n');
         }
 
-        function sendData(payload) {
-            if (socket && socket.readyState === 1) { // 1 = OPEN
-                socket.send(JSON.stringify(payload));
-            }
-        }
-
-        document.getElementById('startBtn').addEventListener('click', function() {
-            log("Requesting motion permissions...");
+        function startLegacyDeviceOrientation() {
+            log("Starting legacy DeviceOrientation API...");
             if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
                 DeviceOrientationEvent.requestPermission()
                     .then(permissionState => {
-                        log("Permission response: " + permissionState);
                         if (permissionState === 'granted') {
-                            window.addEventListener('deviceorientation', handleOrientation);
+                            window.addEventListener('deviceorientation', handleLegacyOrientation);
                             enableCalibrationUI();
                         } else {
-                            alert("Permission denied. We need motion tracking to play!");
+                            alert("Permission denied. Motion tracking is required.");
                         }
                     })
                     .catch(err => {
                         log("Permission Error: " + err.message);
                     });
             } else {
-                log("Activating sensors directly...");
-                window.addEventListener('deviceorientation', handleOrientation);
+                window.addEventListener('deviceorientation', handleLegacyOrientation);
                 enableCalibrationUI();
+            }
+        }
+
+        function startRelativeOrientationSensor() {
+            log("Attempting modern RelativeOrientationSensor...");
+            try {
+                const options = { frequency: 60 };
+                const sensor = new RelativeOrientationSensor(options);
+                
+                sensor.addEventListener('reading', () => {
+                    sensorActive = true;
+                    const q = sensor.quaternion;
+                    // Generic Sensor API quaternion layout is [x, y, z, w]
+                    currentQuat = { x: q[0], y: q[1], z: q[2], w: q[3] };
+                    
+                    logEl.innerText = `Native Quaternion Sensor: Active\n\n` + logEl.innerText.split('\n').slice(2).join('\n');
+                });
+
+                sensor.addEventListener('error', error => {
+                    log("Sensor error: " + error.name + ". Switching to legacy...");
+                    startLegacyDeviceOrientation();
+                });
+
+                sensor.start();
+                enableCalibrationUI();
+            } catch (e) {
+                log("Sensor API exception: " + e.message + ". Switching to legacy...");
+                startLegacyDeviceOrientation();
+            }
+        }
+
+        document.getElementById('startBtn').addEventListener('click', function() {
+            log("Requesting motion permissions...");
+            if ('RelativeOrientationSensor' in window) {
+                // Request permissions for modern Sensors
+                Promise.all([
+                    navigator.permissions.query({ name: 'accelerometer' }),
+                    navigator.permissions.query({ name: 'gyroscope' })
+                ]).then(results => {
+                    if (results.every(result => result.state === 'granted')) {
+                        startRelativeOrientationSensor();
+                    } else {
+                        // Try requesting directly
+                        startRelativeOrientationSensor();
+                    }
+                }).catch(err => {
+                    log("Permission query error: " + err.message);
+                    startLegacyDeviceOrientation();
+                });
+            } else {
+                startLegacyDeviceOrientation();
             }
         });
 
@@ -212,7 +249,13 @@
             document.getElementById('startBtn').style.display = 'none';
             document.getElementById('calibrateBtn').style.display = 'block';
             document.getElementById('pitchBtn').style.display = 'block';
-            document.getElementById('instructions').innerText = "Hold your phone upright, tap CALIBRATE. Tap PITCH BALL to throw!";
+            document.getElementById('instructions').innerText = "Hold your phone like a bat, tap CALIBRATE. Tap PITCH BALL to throw!";
+        }
+
+        function sendData(payload) {
+            if (socket && socket.readyState === 1) { // 1 = OPEN
+                socket.send(JSON.stringify(payload));
+            }
         }
 
         document.getElementById('calibrateBtn').addEventListener('click', function() {
@@ -227,7 +270,7 @@
             sendData("PITCH");
         });
 
-        // Transmit data at ~30 FPS (33ms interval)
+        // Transmit sensor data to server at 30 FPS
         setInterval(function() {
             if (sensorActive) {
                 sendData(currentQuat);
